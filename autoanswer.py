@@ -32,6 +32,8 @@ import shutil
 import subprocess
 import tempfile
 import threading
+import time
+import urllib.error
 import urllib.request
 import webbrowser
 import tkinter as tk
@@ -57,6 +59,7 @@ PREVIEW_MAX_W = 520          # max width of the live preview, in px
 PREVIEW_FPS = 10
 LIVE_CHECK_MS = 1500         # how often, in live mode, to look at the region for changes
 CHANGE_THRESHOLD = 8         # mean per-pixel difference (0-255) that counts as "changed"
+ERROR_COOLDOWN_S = 20        # after an error (e.g. rate limit), pause live sends this long
 CONFIG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.json")
 
 PROMPT = (
@@ -217,6 +220,7 @@ class App(tk.Tk):
         self.busy = False              # an API call is currently in flight
         self.live = False              # live-answer mode on/off
         self.last_sig = None           # signature of the last frame we sent to the AI
+        self.cooldown_until = 0.0      # monotonic time until which live sends are paused
         self.saved_keys = load_keys()  # {provider_name: api_key} from config.json
 
         # --- AI provider row
@@ -355,9 +359,10 @@ class App(tk.Tk):
         return sum(abs(x - y) for x, y in zip(a, b)) / len(a)
 
     def _live_loop(self):
-        # Watches the region while live mode is on; sends a frame to Claude only
-        # when the content has changed and no request is already in flight.
-        if self.live and self.region and not self.busy:
+        # Watches the region while live mode is on; sends a frame to the AI only
+        # when the content has changed, no request is already in flight, and we're
+        # not in a post-error cooldown (which backs off after e.g. a rate limit).
+        if self.live and self.region and not self.busy and time.monotonic() >= self.cooldown_until:
             try:
                 img = self._grab_region_image()
                 sig = self._signature(img)
@@ -386,6 +391,7 @@ class App(tk.Tk):
     def _worker(self, cfg, model, key, b64, prompt):
         """Runs off the main thread: calls the selected provider, returns text."""
         kind = cfg["kind"]
+        is_error = False
         try:
             if kind == "anthropic":
                 text = self._call_anthropic(key, model, b64, prompt)
@@ -400,8 +406,36 @@ class App(tk.Tk):
             else:
                 text = f"Error: unknown provider kind '{kind}'"
         except Exception as ex:
-            text = f"Error: {ex}"
-        self.after(0, lambda: self._finish(text))
+            text = f"Error: {self._friendly_error(ex)}"
+            is_error = True
+        self.after(0, lambda: self._finish(text, is_error))
+
+    @staticmethod
+    def _friendly_error(ex):
+        """Turn a provider/HTTP exception into a clear, actionable message."""
+        # urllib raises HTTPError for non-2xx; the Anthropic SDK exposes .status_code.
+        code = getattr(ex, "code", None) or getattr(ex, "status_code", None)
+        body = ""
+        if isinstance(ex, urllib.error.HTTPError):
+            try:
+                body = ex.read().decode(errors="replace").strip()[:600]
+            except Exception:
+                pass
+        if code == 429:
+            retry = ""
+            hdrs = getattr(ex, "headers", None)
+            if hdrs and hdrs.get("Retry-After"):
+                retry = f" Provider says retry after {hdrs.get('Retry-After')}s."
+            msg = (
+                "Rate limited (HTTP 429). The provider is throttling you or your "
+                "account is out of quota/credit." + retry +
+                f"\n\nLive mode will pause for {ERROR_COOLDOWN_S}s before trying again. "
+                "Slow the changes, switch AI, or check your plan/billing."
+            )
+            return msg + (f"\n\n{body}" if body else "")
+        if isinstance(ex, urllib.error.HTTPError):
+            return f"HTTP {ex.code} {ex.reason}" + (f"\n\n{body}" if body else "")
+        return str(ex)
 
     @staticmethod
     def _http_json(url, payload, headers, timeout=180):
@@ -502,8 +536,11 @@ class App(tk.Tk):
                 except OSError:
                     pass
 
-    def _finish(self, text):
+    def _finish(self, text, is_error=False):
         self.busy = False
+        if is_error:
+            # Back off so live mode doesn't immediately re-fire and worsen a rate limit.
+            self.cooldown_until = time.monotonic() + ERROR_COOLDOWN_S
         self._set_answer(text)
 
     def _set_answer(self, text):
