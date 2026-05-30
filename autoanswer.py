@@ -1,17 +1,27 @@
 """
-AutoAnswer - live screen-region capture that asks Claude to answer what it sees.
+AutoAnswer - live screen-region capture that asks an AI to answer what it sees.
 
 Workflow:
   1. Click "Select Region" and drag a rectangle over the part of your screen
      you want to watch (a quiz question, a problem, anything).
   2. A live OBS-style preview of that region updates continuously.
-  3. Toggle "Live Answer: ON" (or press F9). While on, the app watches the
-     region and, whenever its contents change, sends that frame to Claude's
-     vision API and shows the answer. Toggle it off to stop.
+  3. Pick an AI from the dropdown, optionally edit the model and instructions.
+  4. Toggle "Live Answer: ON" (or press F9). While on, the app watches the
+     region and, whenever its contents change, sends that frame to the chosen
+     model's vision API and shows the answer. Toggle it off to stop.
 
-Needs an Anthropic API key: set the ANTHROPIC_API_KEY environment variable,
-or paste it into the key field and click "Save key" (stored in config.json
-next to this script).
+Supported AIs (see the PROVIDERS table below):
+  - Claude (logged in) ... uses the local Claude Code CLI, no API key needed
+  - Claude (API key) ..... Anthropic API        (ANTHROPIC_API_KEY)
+  - OpenAI (GPT) ......... OpenAI API            (OPENAI_API_KEY)
+  - Google (Gemini) ...... Gemini API            (GEMINI_API_KEY / GOOGLE_API_KEY)
+  - xAI (Grok) ........... xAI API               (XAI_API_KEY)
+  - Llama (Ollama) ....... local Ollama server, no API key needed
+
+For the API-key providers, set the matching environment variable, or paste a
+key into the key field and click "Save key" (keys are stored per provider in
+config.json next to this script). The dropdown loads the right key/model when
+you switch providers.
 """
 
 import base64
@@ -42,7 +52,6 @@ except Exception:
     except Exception:
         pass
 
-MODEL = "claude-sonnet-4-6"  # good vision + fast; swap to "claude-opus-4-8" for max quality
 OLLAMA_URL = "http://localhost:11434/api/generate"   # local Llama (Ollama) endpoint
 PREVIEW_MAX_W = 520          # max width of the live preview, in px
 PREVIEW_FPS = 10
@@ -55,6 +64,45 @@ PROMPT = (
     "directly answer the question or solve the problem it contains. If it is "
     "multiple choice, give the correct option and a one-line reason. Be concise."
 )
+
+# --- Available AI providers. "kind" selects which call path is used; the rest
+# is per-provider config. Add a new vision model by adding an entry here.
+#   needs_key  : whether an API key field applies
+#   default_model : model id pre-filled when this provider is picked
+#   env_keys   : environment variables checked for a key (first non-empty wins)
+#   endpoint   : HTTP endpoint (openai-compatible providers)
+#   key_url    : where to create/copy an API key (opened by "Get key")
+PROVIDERS = {
+    "Claude (logged in)": {
+        "kind": "claude_cli", "needs_key": False, "default_model": "",
+    },
+    "Claude (API key)": {
+        "kind": "anthropic", "needs_key": True, "default_model": "claude-sonnet-4-6",
+        "env_keys": ["ANTHROPIC_API_KEY"],
+        "key_url": "https://console.anthropic.com/settings/keys",
+    },
+    "OpenAI (GPT)": {
+        "kind": "openai", "needs_key": True, "default_model": "gpt-4o",
+        "endpoint": "https://api.openai.com/v1/chat/completions",
+        "env_keys": ["OPENAI_API_KEY"],
+        "key_url": "https://platform.openai.com/api-keys",
+    },
+    "Google (Gemini)": {
+        "kind": "gemini", "needs_key": True, "default_model": "gemini-2.0-flash",
+        "env_keys": ["GEMINI_API_KEY", "GOOGLE_API_KEY"],
+        "key_url": "https://aistudio.google.com/app/apikey",
+    },
+    "xAI (Grok)": {
+        "kind": "openai", "needs_key": True, "default_model": "grok-2-vision-1212",
+        "endpoint": "https://api.x.ai/v1/chat/completions",
+        "env_keys": ["XAI_API_KEY"],
+        "key_url": "https://console.x.ai/",
+    },
+    "Llama (Ollama)": {
+        "kind": "ollama", "needs_key": False, "default_model": "llama3.2-vision",
+    },
+}
+DEFAULT_PROVIDER = "Claude (logged in)"
 
 
 def find_claude():
@@ -69,20 +117,37 @@ def find_claude():
     return guess if os.path.exists(guess) else (exe or "claude")
 
 
-def load_api_key():
-    key = os.environ.get("ANTHROPIC_API_KEY", "").strip()
-    if key:
-        return key
+def load_keys():
+    """Return the saved {provider_name: api_key} map from config.json.
+
+    Migrates the old single-key format ({"api_key": "..."}) into the new
+    per-provider map so existing configs keep working.
+    """
     try:
         with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-            return json.load(f).get("api_key", "").strip()
+            data = json.load(f)
     except Exception:
-        return ""
+        return {}
+    keys = dict(data.get("keys", {}))
+    legacy = data.get("api_key", "").strip()
+    if legacy and "Claude (API key)" not in keys:
+        keys["Claude (API key)"] = legacy
+    return keys
 
 
-def save_api_key(key):
+def save_keys(keys):
+    clean = {name: k.strip() for name, k in keys.items() if k and k.strip()}
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
-        json.dump({"api_key": key.strip()}, f)
+        json.dump({"keys": clean}, f)
+
+
+def env_key_for(name):
+    """Return an API key from the environment for the given provider, if set."""
+    for env in PROVIDERS.get(name, {}).get("env_keys", []):
+        v = os.environ.get(env, "").strip()
+        if v:
+            return v
+    return ""
 
 
 class RegionSelector(tk.Toplevel):
@@ -151,30 +216,42 @@ class App(tk.Tk):
         self.photo = None              # keep a ref so Tk doesn't GC the image
         self.busy = False              # an API call is currently in flight
         self.live = False              # live-answer mode on/off
-        self.last_sig = None           # signature of the last frame we sent to Claude
-
-        # --- API key row
-        top = tk.Frame(self)
-        top.pack(fill="x", padx=10, pady=8)
-        tk.Label(top, text="API key:").pack(side="left")
-        self.key_var = tk.StringVar(value=load_api_key())
-        self.key_entry = tk.Entry(top, textvariable=self.key_var, show="*")
-        self.key_entry.pack(side="left", fill="x", expand=True, padx=6)
-        tk.Button(top, text="Save key", command=self._save_key).pack(side="left")
-        tk.Button(top, text="Get key →", command=self._open_console).pack(side="left", padx=(6, 0))
+        self.last_sig = None           # signature of the last frame we sent to the AI
+        self.saved_keys = load_keys()  # {provider_name: api_key} from config.json
 
         # --- AI provider row
         prov = tk.Frame(self)
-        prov.pack(fill="x", padx=10, pady=(0, 4))
+        prov.pack(fill="x", padx=10, pady=8)
         tk.Label(prov, text="AI:").pack(side="left")
-        self.provider_var = tk.StringVar(value="Claude (logged in)")
+        self.provider_var = tk.StringVar(value=DEFAULT_PROVIDER)
         tk.OptionMenu(
-            prov, self.provider_var,
-            "Claude (logged in)", "Claude (API key)", "Llama (Ollama)",
+            prov, self.provider_var, *PROVIDERS.keys(),
+            command=self._provider_changed,
         ).pack(side="left", padx=6)
-        tk.Label(prov, text="Ollama model:").pack(side="left")
-        self.ollama_var = tk.StringVar(value="llama3.2-vision")
-        tk.Entry(prov, textvariable=self.ollama_var, width=18).pack(side="left", padx=6)
+        tk.Label(prov, text="Model:").pack(side="left")
+        self.model_var = tk.StringVar(value=PROVIDERS[DEFAULT_PROVIDER]["default_model"])
+        self.model_entry = tk.Entry(prov, textvariable=self.model_var, width=20)
+        self.model_entry.pack(side="left", padx=6)
+
+        # --- API key row (per provider)
+        top = tk.Frame(self)
+        top.pack(fill="x", padx=10, pady=(0, 4))
+        tk.Label(top, text="API key:").pack(side="left")
+        self.key_var = tk.StringVar()
+        self.key_entry = tk.Entry(top, textvariable=self.key_var, show="*")
+        self.key_entry.pack(side="left", fill="x", expand=True, padx=6)
+        self.save_key_btn = tk.Button(top, text="Save key", command=self._save_key)
+        self.save_key_btn.pack(side="left")
+        self.get_key_btn = tk.Button(top, text="Get key →", command=self._open_console)
+        self.get_key_btn.pack(side="left", padx=(6, 0))
+
+        # --- custom instructions for the AI (applied to every captured frame)
+        instr = tk.Frame(self)
+        instr.pack(fill="x", padx=10, pady=(4, 0))
+        tk.Label(instr, text="Instructions for the AI:").pack(anchor="w")
+        self.prompt_text = tk.Text(instr, height=3, wrap="word")
+        self.prompt_text.pack(fill="x")
+        self.prompt_text.insert("1.0", PROMPT)
 
         # --- controls
         ctrl = tk.Frame(self)
@@ -192,14 +269,30 @@ class App(tk.Tk):
         self.preview.pack(padx=10, pady=8)
 
         # --- answer box
-        tk.Label(self, text="Claude's answer:").pack(anchor="w", padx=10)
+        tk.Label(self, text="AI answer:").pack(anchor="w", padx=10)
         self.answer = scrolledtext.ScrolledText(self, height=12, wrap="word")
         self.answer.pack(fill="both", expand=True, padx=10, pady=(0, 10))
 
         self.bind("<F9>", lambda e: self._toggle_live())
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self._provider_changed(DEFAULT_PROVIDER)  # set key/model fields for the default
         self._update_preview()
         self._live_loop()
+
+    # ---- provider selection
+    def _provider_changed(self, name):
+        """React to the AI dropdown: load that provider's key and default model,
+        and enable/disable the key and model fields as appropriate."""
+        cfg = PROVIDERS[name]
+        self.model_var.set(cfg["default_model"])
+        self.key_var.set(env_key_for(name) or self.saved_keys.get(name, ""))
+        needs_key = cfg["needs_key"]
+        key_state = "normal" if needs_key else "disabled"
+        self.key_entry.config(state=key_state)
+        self.save_key_btn.config(state=key_state)
+        self.get_key_btn.config(state="normal" if cfg.get("key_url") else "disabled")
+        # the logged-in Claude CLI picks its own model; everything else uses the field
+        self.model_entry.config(state="disabled" if cfg["kind"] == "claude_cli" else "normal")
 
     # ---- region selection
     def _select_region(self):
@@ -239,8 +332,9 @@ class App(tk.Tk):
             if not self.region:
                 messagebox.showinfo("AutoAnswer", "Select a region first.")
                 return
-            if self.provider_var.get() == "Claude (API key)" and not self.key_var.get().strip():
-                messagebox.showwarning("AutoAnswer", "Enter an Anthropic API key first.")
+            name = self.provider_var.get()
+            if PROVIDERS[name]["needs_key"] and not self.key_var.get().strip():
+                messagebox.showwarning("AutoAnswer", f"Enter an API key for {name} first.")
                 return
             self.live = True
             self.last_sig = None  # force an answer on the first frame
@@ -278,62 +372,113 @@ class App(tk.Tk):
         buf = io.BytesIO()
         img.save(buf, format="PNG")
         b64 = base64.b64encode(buf.getvalue()).decode()
+        prompt = self.prompt_text.get("1.0", "end").strip() or PROMPT
+        name = self.provider_var.get()
+        cfg = PROVIDERS[name]
+        model = self.model_var.get().strip() or cfg["default_model"]
+        key = self.key_var.get().strip()
         self.busy = True
         self._set_answer("Answering...")
-        provider = self.provider_var.get()
-        if provider == "Claude (API key)":
-            target, arg = self._ask_claude, self.key_var.get().strip()
-        elif provider == "Claude (logged in)":
-            target, arg = self._ask_claude_cli, None
-        else:
-            target, arg = self._ask_ollama, self.ollama_var.get().strip()
-        threading.Thread(target=target, args=(arg, b64), daemon=True).start()
+        threading.Thread(
+            target=self._worker, args=(cfg, model, key, b64, prompt), daemon=True
+        ).start()
 
-    def _ask_claude(self, key, b64):
+    def _worker(self, cfg, model, key, b64, prompt):
+        """Runs off the main thread: calls the selected provider, returns text."""
+        kind = cfg["kind"]
         try:
-            client = anthropic.Anthropic(api_key=key)
-            resp = client.messages.create(
-                model=MODEL,
-                max_tokens=1024,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {"type": "image", "source": {
-                            "type": "base64",
-                            "media_type": "image/png",
-                            "data": b64,
-                        }},
-                        {"type": "text", "text": PROMPT},
-                    ],
-                }],
-            )
-            text = "".join(b.text for b in resp.content if b.type == "text")
+            if kind == "anthropic":
+                text = self._call_anthropic(key, model, b64, prompt)
+            elif kind == "openai":
+                text = self._call_openai(cfg["endpoint"], key, model, b64, prompt)
+            elif kind == "gemini":
+                text = self._call_gemini(key, model, b64, prompt)
+            elif kind == "ollama":
+                text = self._call_ollama(model, b64, prompt)
+            elif kind == "claude_cli":
+                text = self._call_claude_cli(b64, prompt)
+            else:
+                text = f"Error: unknown provider kind '{kind}'"
         except Exception as ex:
             text = f"Error: {ex}"
         self.after(0, lambda: self._finish(text))
 
-    def _ask_ollama(self, model, b64):
+    @staticmethod
+    def _http_json(url, payload, headers, timeout=180):
+        data = json.dumps(payload).encode()
+        req = urllib.request.Request(url, data=data, headers=headers)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+    def _call_anthropic(self, key, model, b64, prompt):
+        client = anthropic.Anthropic(api_key=key)
+        resp = client.messages.create(
+            model=model,
+            max_tokens=1024,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {"type": "image", "source": {
+                        "type": "base64",
+                        "media_type": "image/png",
+                        "data": b64,
+                    }},
+                    {"type": "text", "text": prompt},
+                ],
+            }],
+        )
+        return "".join(b.text for b in resp.content if b.type == "text")
+
+    def _call_openai(self, endpoint, key, model, b64, prompt):
+        # OpenAI Chat Completions format; also used by OpenAI-compatible APIs (xAI).
+        data = self._http_json(endpoint, {
+            "model": model,
+            "max_tokens": 1024,
+            "messages": [{
+                "role": "user",
+                "content": [
+                    {"type": "text", "text": prompt},
+                    {"type": "image_url", "image_url": {
+                        "url": f"data:image/png;base64,{b64}"
+                    }},
+                ],
+            }],
+        }, {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {key}",
+        })
+        return data["choices"][0]["message"]["content"].strip()
+
+    def _call_gemini(self, key, model, b64, prompt):
+        url = (
+            f"https://generativelanguage.googleapis.com/v1beta/models/"
+            f"{model}:generateContent?key={key}"
+        )
+        data = self._http_json(url, {
+            "contents": [{
+                "parts": [
+                    {"text": prompt},
+                    {"inline_data": {"mime_type": "image/png", "data": b64}},
+                ],
+            }],
+        }, {"Content-Type": "application/json"})
+        parts = data["candidates"][0]["content"]["parts"]
+        return "".join(p.get("text", "") for p in parts).strip()
+
+    def _call_ollama(self, model, b64, prompt):
         try:
-            payload = json.dumps({
-                "model": model,
-                "prompt": PROMPT,
-                "images": [b64],
-                "stream": False,
-            }).encode()
-            req = urllib.request.Request(
-                OLLAMA_URL, data=payload, headers={"Content-Type": "application/json"}
-            )
-            with urllib.request.urlopen(req, timeout=180) as r:
-                text = json.loads(r.read()).get("response", "").strip()
-            text = text or "(empty response — is this a vision model? try: ollama pull llama3.2-vision)"
+            data = self._http_json(OLLAMA_URL, {
+                "model": model, "prompt": prompt, "images": [b64], "stream": False,
+            }, {"Content-Type": "application/json"})
+            text = data.get("response", "").strip()
+            return text or "(empty response — is this a vision model? try: ollama pull llama3.2-vision)"
         except Exception as ex:
-            text = (
+            return (
                 f"Error: {ex}\n\nIs Ollama running and is '{model}' a vision model?\n"
                 "Pull one with:  ollama pull llama3.2-vision"
             )
-        self.after(0, lambda: self._finish(text))
 
-    def _ask_claude_cli(self, _arg, b64):
+    def _call_claude_cli(self, b64, prompt):
         # Uses the logged-in Claude Code CLI (no API key): write the frame to a
         # temp PNG and let `claude -p` read it via its Read tool.
         path = None
@@ -341,28 +486,21 @@ class App(tk.Tk):
             fd, path = tempfile.mkstemp(suffix=".png")
             with os.fdopen(fd, "wb") as f:
                 f.write(base64.b64decode(b64))
-            prompt = (
-                f"Read the image file at {path} and directly answer the question "
-                "or solve the problem it contains. If multiple choice, give the "
-                "correct option and a one-line reason. Be concise."
-            )
+            cli_prompt = f"Read the image file at {path}. {prompt}"
             proc = subprocess.run(
-                [find_claude(), "-p", prompt, "--allowedTools", "Read"],
+                [find_claude(), "-p", cli_prompt, "--allowedTools", "Read"],
                 capture_output=True, text=True,
                 stdin=subprocess.DEVNULL, timeout=180,
             )
-            text = (proc.stdout or "").strip() or (proc.stderr or "").strip() or "(no response)"
+            return (proc.stdout or "").strip() or (proc.stderr or "").strip() or "(no response)"
         except FileNotFoundError:
-            text = "Error: Claude Code CLI not found. Install it or use a different AI."
-        except Exception as ex:
-            text = f"Error: {ex}"
+            return "Error: Claude Code CLI not found. Install it or use a different AI."
         finally:
             if path and os.path.exists(path):
                 try:
                     os.remove(path)
                 except OSError:
                     pass
-        self.after(0, lambda: self._finish(text))
 
     def _finish(self, text):
         self.busy = False
@@ -373,13 +511,16 @@ class App(tk.Tk):
         self.answer.insert("1.0", text)
 
     def _save_key(self):
-        save_api_key(self.key_var.get())
-        self.status.config(text="API key saved", fg="green")
+        name = self.provider_var.get()
+        self.saved_keys[name] = self.key_var.get().strip()
+        save_keys(self.saved_keys)
+        self.status.config(text=f"API key saved for {name}", fg="green")
 
     def _open_console(self):
-        # Anthropic's API authenticates with a key (no account login for apps).
-        # This just opens the page where you create/copy one; paste it once + Save.
-        webbrowser.open("https://console.anthropic.com/settings/keys")
+        # Open the page where you create/copy an API key for the current provider.
+        url = PROVIDERS[self.provider_var.get()].get("key_url")
+        if url:
+            webbrowser.open(url)
 
     def _on_close(self):
         try:
