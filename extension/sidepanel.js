@@ -10,6 +10,7 @@ const PROMPT =
 const LOOP_MS = 1200; // how often we capture/check (also bounds captureVisibleTab calls)
 const CHANGE_THRESHOLD = 8; // mean per-pixel grayscale diff (0-255) that counts as "changed"
 const ERROR_COOLDOWN_MS = 20000; // after an error (e.g. 429), pause live sends this long
+const INSTRUCTIONS_IDLE_MS = 900; // pause after typing instructions before we re-answer
 
 // ---- DOM
 const $ = (id) => document.getElementById(id);
@@ -38,6 +39,9 @@ let busy = false;
 let selecting = false;
 let lastSig = null;
 let cooldownUntil = 0;
+let instrTimer = null; // debounce timer for "done typing instructions"
+let lastRegenInstr = null; // instructions text we last auto-answered, to skip no-op repeats
+let pendingRegen = false; // a regenerate was requested while busy; run it when free
 let store = { keys: {}, models: {}, provider: null, instructions: PROMPT };
 
 // ---- helpers
@@ -55,6 +59,13 @@ function setAnswer(text) {
 function captureTab() {
   // Screenshot of the visible area of the active tab in the current window.
   return chrome.tabs.captureVisibleTab({ format: "png" });
+}
+
+// Capture the tab and return a canvas cropped to the current region.
+async function captureCrop() {
+  const dataUrl = await captureTab();
+  const img = await loadImage(dataUrl);
+  return cropCanvas(img, region);
 }
 
 function loadImage(dataUrl) {
@@ -278,16 +289,46 @@ async function send(crop) {
     cooldownUntil = now() + ERROR_COOLDOWN_MS; // back off after any failure
   } finally {
     busy = false;
+    if (pendingRegen) {
+      // instructions changed while we were answering — honor the latest text now
+      pendingRegen = false;
+      regenerateForInstructions();
+    }
   }
+}
+
+// Capture the current region and answer with the latest instructions. Used when
+// the user finishes editing the Instructions box, independent of Live mode.
+async function regenerateForInstructions() {
+  if (!region) {
+    setStatus("Select a region first to answer new instructions.");
+    return;
+  }
+  if (!els.key.value.trim()) {
+    setStatus(`Enter an API key for ${currentProvider()} first.`, "err");
+    return;
+  }
+  if (busy) {
+    pendingRegen = true; // a request is in flight; rerun with the new text after it
+    return;
+  }
+  let crop;
+  try {
+    crop = await captureCrop();
+  } catch (e) {
+    setStatus("Capture failed (restricted page?).", "err");
+    return;
+  }
+  lastSig = signature(crop); // keep Live mode from immediately re-sending the same frame
+  setStatus("New instructions — answering…", "ok");
+  send(crop);
 }
 
 // ---- main loop: capture, update preview, and (if live) detect change + send
 async function tick() {
   if (region && !selecting) {
     try {
-      const dataUrl = await captureTab();
-      const img = await loadImage(dataUrl);
-      const crop = cropCanvas(img, region);
+      const crop = await captureCrop();
       showPreview(crop);
       if (live && !busy && now() >= cooldownUntil) {
         const sig = signature(crop);
@@ -309,9 +350,19 @@ els.model.addEventListener("change", () => {
   store.models[currentProvider()] = els.model.value.trim();
   saveStore();
 });
-els.instructions.addEventListener("change", () => {
+els.instructions.addEventListener("input", () => {
   store.instructions = els.instructions.value;
-  saveStore();
+  // Debounce: wait until typing pauses, then save and (if the text actually
+  // changed) generate a fresh answer for the current region.
+  if (instrTimer) clearTimeout(instrTimer);
+  instrTimer = setTimeout(() => {
+    saveStore();
+    const text = els.instructions.value.trim();
+    if (text && text !== lastRegenInstr) {
+      lastRegenInstr = text;
+      regenerateForInstructions();
+    }
+  }, INSTRUCTIONS_IDLE_MS);
 });
 els.saveKey.addEventListener("click", () => {
   const name = currentProvider();
@@ -330,6 +381,7 @@ els.live.addEventListener("click", toggleLive);
   await loadStore();
   buildProviderMenu();
   els.instructions.value = store.instructions;
+  lastRegenInstr = store.instructions.trim(); // don't auto-answer the restored text
   onProviderChanged();
   setLive(false);
   tick();

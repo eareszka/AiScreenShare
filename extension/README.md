@@ -34,7 +34,9 @@ desktop app in a few ways:
 2. Pick an **AI**, fill in the **Model** if you want a non-default one, paste
    your **API key**, and click **Save key**. Use **Get key →** to open the
    provider's key page.
-3. Optionally edit **Instructions for the AI**.
+3. Optionally edit **Instructions for the AI**. When you stop typing, the
+   extension automatically re-answers the current region with the new
+   instructions (no need to toggle Live).
 4. Click **Select region**, then drag a box over the area to watch on the
    screenshot shown in the panel (Esc or click outside to cancel).
 5. The **Live preview** updates about once a second.
@@ -47,8 +49,9 @@ desktop app in a few ways:
 - `chrome.tabs.captureVisibleTab` is rate-limited, so the capture/preview loop
   runs about once per second (`LOOP_MS` in `sidepanel.js`).
 - Change sensitivity is `CHANGE_THRESHOLD`; after an error (e.g. HTTP 429 rate
-  limit) live sends pause for `ERROR_COOLDOWN_MS`. Both are at the top of
-  `sidepanel.js`.
+  limit) live sends pause for `ERROR_COOLDOWN_MS`. The pause after typing
+  instructions before auto-answering is `INSTRUCTIONS_IDLE_MS`. All are at the
+  top of `sidepanel.js`.
 - Each detected change = one paid API call on your account.
 - Keys never leave your browser except in the request to the provider you
   chose. The Anthropic call sets `anthropic-dangerous-direct-browser-access` so
