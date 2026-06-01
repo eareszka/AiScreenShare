@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AutoAnswer</title>
+    <link rel="stylesheet" href="sidepanel.css" />
+  </head>
+  <body>
+    <h1>AutoAnswer</h1>
+
+    <!-- AI provider + model -->
+    <div class="row">
+      <label for="provider">AI</label>
+      <select id="provider"></select>
+    </div>
+    <div class="row">
+      <label for="model">Model</label>
+      <input id="model" type="text" placeholder="model id" />
+    </div>
+
+    <!-- API key (per provider) -->
+    <div class="row">
+      <label for="key">API key</label>
+      <input id="key" type="password" placeholder="paste key" />
+    </div>
+    <div class="row btns">
+      <button id="saveKey">Save key</button>
+      <button id="getKey">Get key &rarr;</button>
+    </div>
+
+    <!-- custom instructions -->
+    <label class="block-label" for="instructions">Instructions for the AI</label>
+    <textarea id="instructions" rows="4"></textarea>
+
+    <!-- controls -->
+    <div class="row btns">
+      <button id="selectRegion">Select region</button>
+      <button id="live" class="live-off">Live: OFF</button>
+    </div>
+    <div id="status" class="status">No region selected</div>
+
+    <!-- region selection overlay (a screenshot you drag a box on) -->
+    <div id="selectWrap" class="hidden">
+      <p class="hint">Drag a box over the area to watch. Click outside to cancel.</p>
+      <canvas id="selectCanvas"></canvas>
+    </div>
+
+    <!-- live preview of the cropped region -->
+    <div class="block-label">Live preview</div>
+    <div id="previewWrap">
+      <img id="preview" alt="live preview" />
+      <span id="previewPlaceholder">no region</span>
+    </div>
+
+    <!-- answer -->
+    <div class="block-label">AI answer</div>
+    <div id="answer" class="answer">Select a region, then turn Live on.</div>
+
+    <script src="providers.js"></script>
+    <script src="sidepanel.js"></script>
+  </body>
+</html>
