@@ -1,5 +1,6 @@
-// AutoAnswer side panel: capture the visible tab, crop a user-selected region,
-// and — while Live is on — send that crop to the chosen AI whenever it changes.
+// SnipAI side panel: capture the visible tab, crop a user-selected region, and
+// send that crop to the chosen AI. The user decides when: "Analyze now" answers
+// once on demand, while "Live" answers automatically whenever the region changes.
 // PROVIDERS / askAI live in providers.js (loaded first).
 
 const PROMPT =
@@ -22,6 +23,7 @@ const els = {
   getKey: $("getKey"),
   instructions: $("instructions"),
   selectRegion: $("selectRegion"),
+  analyze: $("analyze"),
   live: $("live"),
   status: $("status"),
   selectWrap: $("selectWrap"),
@@ -297,6 +299,34 @@ async function send(crop) {
   }
 }
 
+// Answer the current region once, on demand. This is the manual counterpart to
+// Live mode: the user clicks "Analyze now" to choose exactly when the AI looks.
+async function analyzeNow() {
+  if (!region) {
+    setStatus("Select a region first.", "err");
+    return;
+  }
+  if (!els.key.value.trim()) {
+    setStatus(`Enter an API key for ${currentProvider()} first.`, "err");
+    return;
+  }
+  if (busy) {
+    setStatus("Already answering — hold on…");
+    return;
+  }
+  let crop;
+  try {
+    crop = await captureCrop();
+  } catch (e) {
+    setStatus("Capture failed (restricted page?).", "err");
+    return;
+  }
+  showPreview(crop);
+  lastSig = signature(crop); // keep Live mode from immediately re-sending the same frame
+  setStatus("Analyzing…", "ok");
+  send(crop);
+}
+
 // Capture the current region and answer with the latest instructions. Used when
 // the user finishes editing the Instructions box, independent of Live mode.
 async function regenerateForInstructions() {
@@ -375,6 +405,7 @@ els.getKey.addEventListener("click", () => {
   if (url) chrome.tabs.create({ url });
 });
 els.selectRegion.addEventListener("click", startSelect);
+els.analyze.addEventListener("click", analyzeNow);
 els.live.addEventListener("click", toggleLive);
 
 (async function init() {

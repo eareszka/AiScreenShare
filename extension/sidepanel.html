@@ -3,11 +3,11 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>AutoAnswer</title>
+    <title>SnipAI</title>
     <link rel="stylesheet" href="sidepanel.css" />
   </head>
   <body>
-    <h1>AutoAnswer</h1>
+    <h1>SnipAI</h1>
 
     <!-- AI provider + model -->
     <div class="row">
@@ -36,8 +36,13 @@
     <!-- controls -->
     <div class="row btns">
       <button id="selectRegion">Select region</button>
+      <button id="analyze">Analyze now</button>
       <button id="live" class="live-off">Live: OFF</button>
     </div>
+    <p class="hint">
+      <strong>Analyze now</strong> answers the region once, on demand.
+      <strong>Live</strong> answers automatically every time it changes.
+    </p>
     <div id="status" class="status">No region selected</div>
 
     <!-- region selection overlay (a screenshot you drag a box on) -->
@@ -55,7 +60,9 @@
 
     <!-- answer -->
     <div class="block-label">AI answer</div>
-    <div id="answer" class="answer">Select a region, then turn Live on.</div>
+    <div id="answer" class="answer">
+      Select a region, then click Analyze now — or turn Live on.
+    </div>
 
     <script src="providers.js"></script>
     <script src="sidepanel.js"></script>
