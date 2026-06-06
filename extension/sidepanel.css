@@ -161,3 +161,15 @@ button:disabled {
   word-break: break-word;
   line-height: 1.4;
 }
+
+/* Rendered math (MathJax SVG): keep display equations on their own line and let
+   wide equations scroll horizontally instead of overflowing the panel. */
+.answer mjx-container[display="true"] {
+  margin: 0.4em 0;
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+.answer mjx-container {
+  color: var(--fg);
+}

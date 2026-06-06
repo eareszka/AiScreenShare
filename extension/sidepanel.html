@@ -64,6 +64,21 @@
       Select a region, then click Analyze now — or turn Live on.
     </div>
 
+    <!-- Math rendering. tex-svg is a self-contained, offline LaTeX->SVG renderer
+         (no font files). startup.typeset:false so it only runs when we ask it to. -->
+    <script>
+      window.MathJax = {
+        tex: {
+          inlineMath: [["$", "$"], ["\\(", "\\)"]],
+          displayMath: [["$$", "$$"], ["\\[", "\\]"]],
+        },
+        svg: { fontCache: "local" },
+        startup: { typeset: false },
+        options: { enableMenu: false },
+      };
+    </script>
+    <script src="vendor/mathjax/tex-svg.js"></script>
+
     <script src="providers.js"></script>
     <script src="sidepanel.js"></script>
   </body>

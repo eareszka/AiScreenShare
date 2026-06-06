@@ -8,6 +8,16 @@ const PROMPT =
   "directly answer the question or solve the problem it contains. If it is " +
   "multiple choice, give the correct option and a one-line reason. Be concise.";
 
+// Appended to every prompt to control answer formatting. The panel renders LaTeX
+// math (via MathJax) but shows everything else as plain text, so: use LaTeX only
+// for actual math, and never use Markdown headings/bold (those don't render here).
+const FORMAT =
+  " Formatting: if the screenshot is a math problem, write every mathematical " +
+  "expression in LaTeX, wrapped in $ ... $ for inline math and $$ ... $$ for " +
+  "displayed equations (e.g. $$\\frac{d}{dx}(e^x\\cos x) = e^x(\\cos x - \\sin x)$$). " +
+  "If it is not math, reply in plain text with no LaTeX. Either way, do NOT use " +
+  "Markdown headings (#) or bold (**) — write any words as plain prose.";
+
 const LOOP_MS = 1200; // how often we capture/check (also bounds captureVisibleTab calls)
 const CHANGE_THRESHOLD = 8; // mean per-pixel grayscale diff (0-255) that counts as "changed"
 const ERROR_COOLDOWN_MS = 20000; // after an error (e.g. 429), pause live sends this long
@@ -54,8 +64,35 @@ function setStatus(text, cls = "") {
   els.status.className = "status" + (cls ? " " + cls : "");
 }
 
+// Matches LaTeX math delimiters: $...$, $$...$$, \(...\), \[...\]
+const MATH_RE = /\$|\\\(|\\\[/;
+
 function setAnswer(text) {
-  els.answer.textContent = text;
+  const clean = stripMarkdown(text);
+  // Plain text first: it's the safe fallback and what non-math answers should show.
+  els.answer.textContent = clean;
+  // If there's LaTeX and MathJax is ready, typeset it in place (math -> SVG).
+  if (clean && MATH_RE.test(clean) && window.MathJax && MathJax.typesetPromise) {
+    try {
+      MathJax.typesetClear?.([els.answer]);
+      MathJax.typesetPromise([els.answer]).catch(() => {
+        /* malformed LaTeX — leave the plain text as-is */
+      });
+    } catch (_) {
+      /* renderer not ready — plain text stays */
+    }
+  }
+}
+
+// Strip Markdown the panel can't render (headings, bold, inline-code ticks) while
+// leaving LaTeX math untouched so MathJax can typeset it.
+function stripMarkdown(text) {
+  if (!text) return text;
+  return text
+    .replace(/^#{1,6}\s*/gm, "")
+    .replace(/\*\*/g, "")
+    .replace(/`/g, "")
+    .trim();
 }
 
 function captureTab() {
@@ -281,7 +318,7 @@ async function send(crop) {
   const name = currentProvider();
   const model = els.model.value.trim() || PROVIDERS[name].defaultModel;
   const key = els.key.value.trim();
-  const prompt = els.instructions.value.trim() || PROMPT;
+  const prompt = (els.instructions.value.trim() || PROMPT) + FORMAT;
   const b64 = crop.toDataURL("image/png").split(",")[1];
   try {
     const text = await askAI(name, b64, model, key, prompt);
